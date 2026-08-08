@@ -175,6 +175,25 @@ RENDER_FPS=30 \
 ./bash/retarget_from_robot.sh
 ```
 
+### 3）本地 Kengo 目标机器人
+
+`kengo` 分支按照 G1 的结构加入了 23 DoF、固定拳版本 Kengo 的重定向配置。
+项目不需要增加中央注册表，也不需要修改 Python 核心代码：
+
+```bash
+VIS_ROBOTS="kengo" ./bash/retarget_from_smplx.sh
+
+VIS_ROBOTS="kengo" \
+ORIGIN_ROBOT="g1" \
+ROBOT_MOTION_FILE="dataset/lafan1_g1/dance1_subject2.csv" \
+./bash/retarget_from_robot.sh
+```
+
+Kengo CSV 每行固定为 30 列：根位置 3 列、根四元数 XYZW 4 列，以及保持
+Kengo MJCF/控制器原始顺序的 23 个关节。供应的 Kengo XML/STL 原包明确标注
+“Do Not distribute”，因此只保留在本机并由 Git 忽略。具体本地资产约定见
+`asset/robot/kengo_description/README.md`。
+
 ## 核心机制
 
 ### 1）骨架匹配
@@ -337,4 +356,3 @@ $$
 3. 该约束以额外 `FrameTask` 形式加入优化，权重由 `contact_pos_fixed_factor` 控制。
 
 这样可以显著减小支撑相内的足端漂移（foot sliding），同时在摆动相保持动作自由度。
-

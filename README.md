@@ -177,6 +177,26 @@ RENDER_FPS=30 \
 ./bash/retarget_from_robot.sh
 ```
 
+### 3) Local Kengo target
+
+The `kengo` branch adds a G1-style retargeting config for the 23-DoF
+Kengo-with-fist embodiment. No central registry or Python changes are needed:
+
+```bash
+VIS_ROBOTS="kengo" ./bash/retarget_from_smplx.sh
+
+VIS_ROBOTS="kengo" \
+ORIGIN_ROBOT="g1" \
+ROBOT_MOTION_FILE="dataset/lafan1_g1/dance1_subject2.csv" \
+./bash/retarget_from_robot.sh
+```
+
+Kengo CSV output has 30 columns: root position (3), root quaternion in XYZW
+order (4), then 23 joints in the unchanged Kengo MJCF/controller order. The
+supplied Kengo XML/STL bundle is local-only and ignored by Git because its
+source README says "Do Not distribute". See
+`asset/robot/kengo_description/README.md` for the local asset contract.
+
 ## Core Mechanisms
 
 ### 1) Skeleton matching
