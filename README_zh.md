@@ -194,6 +194,20 @@ Kengo MJCF/控制器原始顺序的 23 个关节。供应的 Kengo XML/STL 原�
 “Do Not distribute”，因此只保留在本机并由 Git 忽略。具体本地资产约定见
 `asset/robot/kengo_description/README.md`。
 
+### 4）无界面录制 MP4
+
+可通过 MuJoCo EGL 后端和 ffmpeg，将重定向后的 CSV 动作直接离屏录制：
+
+```bash
+MUJOCO_GL=egl python scripts/render_robot_motion.py \
+  --motion dance1_subject2_from_g1 \
+  --robots kengo \
+  --source-fps 30 --render-fps 30 \
+  --output output_data/videos/dance1_subject2_from_g1_kengo.mp4
+```
+
+输出为 H.264/yuv420p MP4，录制时镜头会自动跟随机器人根节点。
+
 ## 核心机制
 
 ### 1）骨架匹配

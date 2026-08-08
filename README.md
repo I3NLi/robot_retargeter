@@ -197,6 +197,21 @@ supplied Kengo XML/STL bundle is local-only and ignored by Git because its
 source README says "Do Not distribute". See
 `asset/robot/kengo_description/README.md` for the local asset contract.
 
+### 4) Headless MP4 recording
+
+Retargeted CSV motion can be rendered without a desktop session by using
+MuJoCo's EGL backend and ffmpeg:
+
+```bash
+MUJOCO_GL=egl python scripts/render_robot_motion.py \
+  --motion dance1_subject2_from_g1 \
+  --robots kengo \
+  --source-fps 30 --render-fps 30 \
+  --output output_data/videos/dance1_subject2_from_g1_kengo.mp4
+```
+
+The output is an H.264/yuv420p MP4 with a camera that follows the robot root.
+
 ## Core Mechanisms
 
 ### 1) Skeleton matching
