@@ -193,6 +193,12 @@ ROBOT_MOTION_FILE="dataset/lafan1_g1/dance1_subject2.csv" \
 
 Kengo CSV output has 30 columns: root position (3), root quaternion in XYZW
 order (4), then 23 joints in the unchanged Kengo MJCF/controller order. The
+Kengo configuration performs a short bidirectional IK initialization sweep so
+frame zero does not inherit a default-pose branch jump. Before publishing the
+CSV it validates finite state, root-quaternion norm and temporal continuity;
+intervals above the configured `15 rad/s` joint limit are locally subdivided at
+the original FPS with quaternion SLERP, preserving all source keyframes instead
+of globally slowing the motion or clipping joint positions. The
 supplied Kengo XML/STL bundle is local-only and ignored by Git because its
 source README says "Do Not distribute". See
 `asset/robot/kengo_description/README.md` for the local asset contract.

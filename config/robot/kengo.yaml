@@ -3,6 +3,20 @@ verbose: True
 render_debug: False
 keypoints_path: "output_data/keypoints/kengo/body_check_001__A548_M_from_g1_keypoints.pkl"
 
+# Warm-start frame zero with nearby temporal context.  Directly solving the
+# first target from the MJCF default pose can select a different local IK branch
+# and create a one-frame velocity spike.
+initialization_sweep_frames: 5
+
+# Time-scale locally over-fast intervals, then reject any remaining corrupt or
+# discontinuous retarget output before it is published.
+motion_validation:
+  max_joint_velocity_rad_s: 15.0
+  velocity_limit_mode: resample
+  max_local_velocity_ratio: 5.0
+  local_velocity_window_frames: 6
+  min_discontinuity_velocity_rad_s: 5.0
+
 # Keep these offsets and the knee bend identical to the G1 configuration.
 joints_limit_offset_degrees:
   knee_joint: [10.0, 0.0]

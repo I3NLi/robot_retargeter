@@ -100,6 +100,8 @@ class RobotRetarget:
         joints_limit_offset_degrees: dict | None = None,
         contact_body_names: list | tuple | dict | None = None,
         contact_position_cost: float = 10.0,
+        initialization_sweep_frames: int = 0,
+        motion_validation: dict | None = None,
     ):
         self.xml_file = model_path
         self.keypoint_path = keypoint_path
@@ -112,6 +114,15 @@ class RobotRetarget:
         self.joints_limit_offset_degrees = joints_limit_offset_degrees or {}
         self.contact_body_names = self._normalize_contact_body_names(contact_body_names)
         self.contact_position_cost = float(contact_position_cost)
+        if (
+            isinstance(initialization_sweep_frames, bool)
+            or int(initialization_sweep_frames) != initialization_sweep_frames
+        ):
+            raise ValueError("initialization_sweep_frames must be a non-negative integer")
+        self.initialization_sweep_frames = int(initialization_sweep_frames)
+        if self.initialization_sweep_frames < 0:
+            raise ValueError("initialization_sweep_frames must be a non-negative integer")
+        self.motion_validation = dict(motion_validation or {})
         self.verbose = verbose
         self.solver = solver
         self.human_body_to_task = {}
@@ -476,6 +487,67 @@ class RobotRetarget:
                 [task.compute_error(self.configuration) for task in self.tasks]
             )
         )
+
+    def _solve_current_targets(self):
+        """Solve the targets currently installed on the IK tasks.
+
+        Keep this convergence rule identical for warm-up and exported frames so
+        initialization cannot silently use a more permissive solver than the
+        actual retargeting pass.
+        """
+        curr_error = self.error()
+        dt = self.configuration.model.opt.timestep
+        vel = mink.solve_ik(
+            self.configuration,
+            self.tasks,
+            dt,
+            self.solver,
+            self.damping,
+            limits=self.ik_limits,
+        )
+        self.configuration.integrate_inplace(vel, dt)
+        next_error = self.error()
+        num_iter = 0
+        while curr_error - next_error > 0.001 and num_iter < self.max_iter:
+            curr_error = next_error
+            vel = mink.solve_ik(
+                self.configuration,
+                self.tasks,
+                dt,
+                self.solver,
+                self.damping,
+                limits=self.ik_limits,
+            )
+            self.configuration.integrate_inplace(vel, dt)
+            next_error = self.error()
+            num_iter += 1
+        return next_error
+
+    def _warm_start_initial_pose(self):
+        """Initialize frame zero from a short bidirectional target sweep.
+
+        Solving the first target directly from the MJCF default pose can select
+        a poor local IK branch.  A short forward/backward sweep supplies nearby
+        temporal context, then returns the configuration to frame zero before
+        any output is recorded.  This avoids blending or modifying the source
+        motion itself.
+        """
+        last_frame = min(self.initialization_sweep_frames, self.num_frames - 1)
+        if last_frame <= 0:
+            return
+
+        for frame_idx in range(last_frame + 1):
+            self.update_targets(frame_idx)
+            self._solve_current_targets()
+        for frame_idx in range(last_frame - 1, -1, -1):
+            self.update_targets(frame_idx)
+            self._solve_current_targets()
+
+        if self.verbose:
+            print(
+                "[IK initialization] bidirectional sweep complete: "
+                f"frames 0..{last_frame}..0"
+            )
     
     def _draw_pose(self, scene, pos, quat_wxyz, point_rgba, axis_alpha=1.0,
                    point_radius=0.035, axis_radius=0.005, axis_length=0.08):
@@ -629,6 +701,8 @@ class RobotRetarget:
         viewer = None
         _PAUSED = False
 
+        self._warm_start_initial_pose()
+
         if self.render_debug:
             viewer = mujoco.viewer.launch_passive(
                 self.model, self.configuration.data, key_callback=key_callback
@@ -639,25 +713,7 @@ class RobotRetarget:
             for frame_idx in tqdm(range(self.num_frames), desc="Retargeting", unit="frame"):
                 start_time = time.time()
                 self.update_targets(frame_idx)
-
-                curr_error = self.error()
-                dt = self.configuration.model.opt.timestep
-
-                vel = mink.solve_ik(
-                    self.configuration, self.tasks, dt, self.solver, self.damping, limits=self.ik_limits
-                )
-                self.configuration.integrate_inplace(vel, dt)
-                next_error = self.error()
-                num_iter = 0
-                while curr_error - next_error > 0.001 and num_iter < self.max_iter:
-                    curr_error = next_error
-                    dt = self.configuration.model.opt.timestep
-                    vel = mink.solve_ik(
-                        self.configuration, self.tasks, dt, self.solver, self.damping, limits=self.ik_limits
-                    )
-                    self.configuration.integrate_inplace(vel, dt)
-                    next_error = self.error()
-                    num_iter += 1
+                self._solve_current_targets()
                 curr_pos = self.configuration.data.qpos.copy()
                 self.result_pos.append(curr_pos)
 
@@ -682,6 +738,395 @@ class RobotRetarget:
             if viewer is not None:
                 viewer.close()
     
+    def _actuated_joint_qpos(self):
+        """Return actuator-order scalar joint names and qpos column indices."""
+        joint_names = []
+        qpos_indices = []
+        seen_joint_ids = set()
+        for actuator_id in range(self.model.nu):
+            joint_id = int(self.model.actuator_trnid[actuator_id, 0])
+            if joint_id < 0 or joint_id in seen_joint_ids:
+                continue
+            seen_joint_ids.add(joint_id)
+            joint_type = int(self.model.jnt_type[joint_id])
+            if joint_type not in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE):
+                continue
+            joint_name = mujoco.mj_id2name(
+                self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_id
+            )
+            joint_names.append(joint_name or f"joint_{joint_id}")
+            qpos_indices.append(int(self.model.jnt_qposadr[joint_id]))
+        return joint_names, np.asarray(qpos_indices, dtype=np.int64)
+
+    @staticmethod
+    def _slerp_wxyz(quat_a, quat_b, blend):
+        """Shortest-path interpolation between two WXYZ unit quaternions."""
+        quat_a = np.asarray(quat_a, dtype=np.float64)
+        quat_b = np.asarray(quat_b, dtype=np.float64)
+        quat_a = quat_a / np.linalg.norm(quat_a)
+        quat_b = quat_b / np.linalg.norm(quat_b)
+        dot = float(np.dot(quat_a, quat_b))
+        if dot < 0.0:
+            quat_b = -quat_b
+            dot = -dot
+        dot = np.clip(dot, -1.0, 1.0)
+        if dot > 0.9995:
+            result = (1.0 - blend) * quat_a + blend * quat_b
+            return result / np.linalg.norm(result)
+        angle = np.arccos(dot)
+        sin_angle = np.sin(angle)
+        return (
+            np.sin((1.0 - blend) * angle) / sin_angle * quat_a
+            + np.sin(blend * angle) / sin_angle * quat_b
+        )
+
+    def _interpolate_qpos(self, qpos_a, qpos_b, blend):
+        """Interpolate a MuJoCo qpos without linearly blending quaternions."""
+        result = (1.0 - blend) * qpos_a + blend * qpos_b
+        for joint_id in range(self.model.njnt):
+            joint_type = int(self.model.jnt_type[joint_id])
+            qpos_adr = int(self.model.jnt_qposadr[joint_id])
+            if joint_type == mujoco.mjtJoint.mjJNT_FREE:
+                quat_slice = slice(qpos_adr + 3, qpos_adr + 7)
+            elif joint_type == mujoco.mjtJoint.mjJNT_BALL:
+                quat_slice = slice(qpos_adr, qpos_adr + 4)
+            else:
+                continue
+            result[quat_slice] = self._slerp_wxyz(
+                qpos_a[quat_slice], qpos_b[quat_slice], blend
+            )
+        return result
+
+    def _subdivide_qpos_intervals(self, result, subdivisions):
+        """Subdivide selected qpos intervals while preserving every keyframe."""
+        subdivisions = np.asarray(subdivisions, dtype=np.int64)
+        expected_shape = (max(result.shape[0] - 1, 0),)
+        if subdivisions.shape != expected_shape:
+            raise ValueError(
+                f"subdivisions must have shape {expected_shape}, got {subdivisions.shape}"
+            )
+        if np.any(subdivisions < 1):
+            raise ValueError("Every interval subdivision count must be at least one")
+
+        inserted_frames = int(np.sum(subdivisions - 1))
+        if inserted_frames == 0:
+            return result
+
+        resampled = [result[0].copy()]
+        for frame_idx, subdivision_count in enumerate(subdivisions):
+            for subdivision_idx in range(1, int(subdivision_count) + 1):
+                if subdivision_idx == subdivision_count:
+                    # Preserve every original keyframe bit-for-bit.  Besides
+                    # avoiding needless roundoff, this keeps the source's
+                    # chosen quaternion sign at interval boundaries.
+                    resampled.append(result[frame_idx + 1].copy())
+                    continue
+                blend = subdivision_idx / float(subdivision_count)
+                resampled.append(
+                    self._interpolate_qpos(
+                        result[frame_idx], result[frame_idx + 1], blend
+                    )
+                )
+        return np.asarray(resampled, dtype=np.float64)
+
+    def _resample_to_joint_velocity_limit(self, result, max_joint_velocity):
+        """Locally time-scale qpos intervals that exceed a joint speed limit.
+
+        Each original interval is subdivided just enough to satisfy the limit
+        at the unchanged motion fps.  This preserves every original keyframe
+        and the geometric path, unlike position clipping, while extending only
+        the portions of the motion that are physically too fast.
+        """
+        _, qpos_indices = self._actuated_joint_qpos()
+        if result.shape[0] < 2 or qpos_indices.size == 0:
+            return result
+
+        interval_peak_velocity = (
+            np.max(np.abs(np.diff(result[:, qpos_indices], axis=0)), axis=1)
+            * float(self.fps)
+        )
+        subdivisions = np.maximum(
+            1,
+            np.ceil(interval_peak_velocity / max_joint_velocity - 1.0e-12).astype(np.int64),
+        )
+        inserted_frames = int(np.sum(subdivisions - 1))
+        if inserted_frames == 0:
+            return result
+        resampled = self._subdivide_qpos_intervals(result, subdivisions)
+        if self.verbose:
+            original_duration = (result.shape[0] - 1) / float(self.fps)
+            resampled_duration = (resampled.shape[0] - 1) / float(self.fps)
+            print(
+                "[motion time scaling] "
+                f"inserted {inserted_frames} frames to enforce "
+                f"{max_joint_velocity:.4f} rad/s; duration "
+                f"{original_duration:.3f}s -> {resampled_duration:.3f}s"
+            )
+        return resampled
+
+    @staticmethod
+    def _local_velocity_ratio_profile(velocity_norm, window, min_speed):
+        """Return per-interval local spike ratios and neighbor medians."""
+        velocity_norm = np.asarray(velocity_norm, dtype=np.float64)
+        ratios = np.zeros_like(velocity_norm)
+        medians = np.zeros_like(velocity_norm)
+        for interval_idx, speed in enumerate(velocity_norm):
+            if speed < min_speed:
+                continue
+            begin = max(0, interval_idx - window)
+            end = min(velocity_norm.size, interval_idx + window + 1)
+            neighbors = np.concatenate(
+                (
+                    velocity_norm[begin:interval_idx],
+                    velocity_norm[interval_idx + 1 : end],
+                )
+            )
+            if neighbors.size == 0:
+                continue
+            local_median = float(np.median(neighbors))
+            medians[interval_idx] = local_median
+            ratios[interval_idx] = float(speed / max(local_median, 1.0e-6))
+        return ratios, medians
+
+    def _resample_to_local_velocity_ratio(
+        self,
+        result,
+        max_local_ratio,
+        window,
+        min_speed,
+        max_passes=8,
+    ):
+        """Locally time-scale isolated joint-velocity spikes until they validate.
+
+        The discontinuity metric uses the L2 norm across actuated joint
+        velocities.  An offending interval is subdivided just enough to fall
+        below either the configured local-ratio ceiling or the validator's
+        minimum-speed gate.  Recomputing the profile after each pass makes the
+        operation robust to the changed local neighborhood without smoothing
+        or dropping any source keyframe.
+        """
+        _, qpos_indices = self._actuated_joint_qpos()
+        if result.shape[0] < 3 or qpos_indices.size == 0:
+            return result
+
+        original = result
+        resampled = result
+        total_inserted = 0
+        worst_ratio_before = 0.0
+        passes = 0
+        for pass_idx in range(max_passes):
+            joint_vel = (
+                np.diff(resampled[:, qpos_indices], axis=0) * float(self.fps)
+            )
+            velocity_norm = np.linalg.norm(joint_vel, axis=1)
+            ratios, medians = self._local_velocity_ratio_profile(
+                velocity_norm, window, min_speed
+            )
+            worst_ratio = float(np.max(ratios)) if ratios.size else 0.0
+            if pass_idx == 0:
+                worst_ratio_before = worst_ratio
+            violating = np.flatnonzero(ratios > max_local_ratio + 1.0e-12)
+            if violating.size == 0:
+                break
+
+            subdivisions = np.ones(velocity_norm.shape, dtype=np.int64)
+            for interval_idx in violating:
+                speed = float(velocity_norm[interval_idx])
+                local_ratio_limit = max_local_ratio * max(
+                    float(medians[interval_idx]), 1.0e-6
+                )
+                # If the neighborhood is nearly stationary, crossing just
+                # below min_speed makes the exact same gate used by validation
+                # stop classifying the slowed interval as a discontinuity.
+                if min_speed > 0.0:
+                    local_ratio_limit = max(
+                        local_ratio_limit,
+                        min_speed * (1.0 - 1.0e-6),
+                    )
+                if local_ratio_limit <= 0.0 or not np.isfinite(local_ratio_limit):
+                    raise ValueError(
+                        "Cannot time-scale a local velocity spike with a non-positive target speed"
+                    )
+                subdivision_count = int(
+                    np.ceil(speed / local_ratio_limit - 1.0e-12)
+                )
+                # A ratio violation always needs a real time extension, even
+                # when floating-point rounding produces ceil(...) == 1.
+                subdivisions[interval_idx] = max(2, subdivision_count)
+
+            inserted = int(np.sum(subdivisions - 1))
+            resampled = self._subdivide_qpos_intervals(resampled, subdivisions)
+            total_inserted += inserted
+            passes = pass_idx + 1
+        else:
+            joint_vel = (
+                np.diff(resampled[:, qpos_indices], axis=0) * float(self.fps)
+            )
+            ratios, _ = self._local_velocity_ratio_profile(
+                np.linalg.norm(joint_vel, axis=1), window, min_speed
+            )
+            worst_ratio = float(np.max(ratios)) if ratios.size else 0.0
+            raise ValueError(
+                "Local velocity time scaling did not converge after "
+                f"{max_passes} passes (ratio={worst_ratio:.3f}, "
+                f"limit={max_local_ratio:.3f})"
+            )
+
+        if total_inserted and self.verbose:
+            final_joint_vel = (
+                np.diff(resampled[:, qpos_indices], axis=0) * float(self.fps)
+            )
+            final_ratios, _ = self._local_velocity_ratio_profile(
+                np.linalg.norm(final_joint_vel, axis=1), window, min_speed
+            )
+            worst_ratio_after = (
+                float(np.max(final_ratios)) if final_ratios.size else 0.0
+            )
+            original_duration = (original.shape[0] - 1) / float(self.fps)
+            resampled_duration = (resampled.shape[0] - 1) / float(self.fps)
+            print(
+                "[local continuity time scaling] "
+                f"inserted {total_inserted} frames in {passes} pass(es); "
+                f"local ratio {worst_ratio_before:.3f}->{worst_ratio_after:.3f}; "
+                f"duration {original_duration:.3f}s->{resampled_duration:.3f}s"
+            )
+        return resampled
+
+    def _postprocess_result_motion(self, result):
+        self._validate_qpos_values(result)
+        max_joint_velocity = self.motion_validation.get("max_joint_velocity_rad_s")
+        velocity_limit_mode = self.motion_validation.get("velocity_limit_mode", "reject")
+        if velocity_limit_mode not in ("reject", "resample"):
+            raise ValueError("velocity_limit_mode must be 'reject' or 'resample'")
+        if velocity_limit_mode == "reject":
+            return result
+
+        if max_joint_velocity is not None:
+            max_joint_velocity = float(max_joint_velocity)
+            if not np.isfinite(max_joint_velocity) or max_joint_velocity <= 0:
+                raise ValueError("max_joint_velocity_rad_s must be finite and positive")
+            result = self._resample_to_joint_velocity_limit(
+                result, max_joint_velocity
+            )
+
+        max_local_ratio = self.motion_validation.get("max_local_velocity_ratio")
+        if max_local_ratio is not None:
+            max_local_ratio = float(max_local_ratio)
+            window = int(
+                self.motion_validation.get("local_velocity_window_frames", 6)
+            )
+            min_speed = float(
+                self.motion_validation.get(
+                    "min_discontinuity_velocity_rad_s", 5.0
+                )
+            )
+            if not np.isfinite(max_local_ratio) or max_local_ratio <= 1.0:
+                raise ValueError(
+                    "max_local_velocity_ratio must be finite and greater than 1"
+                )
+            if window < 1:
+                raise ValueError("local_velocity_window_frames must be at least 1")
+            if not np.isfinite(min_speed) or min_speed < 0:
+                raise ValueError(
+                    "min_discontinuity_velocity_rad_s must be finite and non-negative"
+                )
+            result = self._resample_to_local_velocity_ratio(
+                result,
+                max_local_ratio=max_local_ratio,
+                window=window,
+                min_speed=min_speed,
+            )
+        return result
+
+    def _validate_qpos_values(self, result):
+        """Validate qpos values needed before any quaternion interpolation."""
+        if not np.isfinite(result).all():
+            raise ValueError("Retarget result contains non-finite qpos values")
+        if not np.isfinite(self.fps) or self.fps <= 0:
+            raise ValueError(f"Motion fps must be finite and positive, got {self.fps}")
+
+        for joint_id in range(self.model.njnt):
+            joint_type = int(self.model.jnt_type[joint_id])
+            qpos_adr = int(self.model.jnt_qposadr[joint_id])
+            if joint_type == mujoco.mjtJoint.mjJNT_FREE:
+                quat_slice = slice(qpos_adr + 3, qpos_adr + 7)
+            elif joint_type == mujoco.mjtJoint.mjJNT_BALL:
+                quat_slice = slice(qpos_adr, qpos_adr + 4)
+            else:
+                continue
+            quat_norm = np.linalg.norm(result[:, quat_slice], axis=1)
+            max_quat_error = float(np.max(np.abs(quat_norm - 1.0)))
+            if max_quat_error > 1.0e-4:
+                raise ValueError(
+                    f"Joint quaternion norm error {max_quat_error:.6g} exceeds 1e-4"
+                )
+
+    def _validate_result_motion(self, result):
+        """Validate numeric and temporal continuity before publishing a CSV."""
+        self._validate_qpos_values(result)
+
+        joint_names, qpos_indices = self._actuated_joint_qpos()
+        if result.shape[0] < 2 or qpos_indices.size == 0:
+            return
+        joint_vel = np.diff(result[:, qpos_indices], axis=0) * float(self.fps)
+        abs_joint_vel = np.abs(joint_vel)
+
+        max_joint_velocity = self.motion_validation.get("max_joint_velocity_rad_s")
+        if max_joint_velocity is not None:
+            max_joint_velocity = float(max_joint_velocity)
+            if not np.isfinite(max_joint_velocity) or max_joint_velocity <= 0:
+                raise ValueError("max_joint_velocity_rad_s must be finite and positive")
+            peak_flat_idx = int(np.argmax(abs_joint_vel))
+            interval_idx, joint_idx = np.unravel_index(peak_flat_idx, abs_joint_vel.shape)
+            peak = float(abs_joint_vel[interval_idx, joint_idx])
+            if peak > max_joint_velocity + 1.0e-8:
+                raise ValueError(
+                    "Retarget result exceeds max joint velocity: "
+                    f"{joint_names[joint_idx]}={peak:.4f} rad/s at frame interval "
+                    f"{interval_idx}->{interval_idx + 1}, limit={max_joint_velocity:.4f} rad/s"
+                )
+
+        max_local_ratio = self.motion_validation.get("max_local_velocity_ratio")
+        if max_local_ratio is not None and joint_vel.shape[0] >= 2:
+            max_local_ratio = float(max_local_ratio)
+            window = int(self.motion_validation.get("local_velocity_window_frames", 6))
+            min_speed = float(
+                self.motion_validation.get("min_discontinuity_velocity_rad_s", 5.0)
+            )
+            if not np.isfinite(max_local_ratio) or max_local_ratio <= 1.0:
+                raise ValueError("max_local_velocity_ratio must be finite and greater than 1")
+            if window < 1:
+                raise ValueError("local_velocity_window_frames must be at least 1")
+            if not np.isfinite(min_speed) or min_speed < 0:
+                raise ValueError(
+                    "min_discontinuity_velocity_rad_s must be finite and non-negative"
+                )
+
+            velocity_norm = np.linalg.norm(joint_vel, axis=1)
+            ratios, _ = self._local_velocity_ratio_profile(
+                velocity_norm, window, min_speed
+            )
+            worst_interval = int(np.argmax(ratios)) if ratios.size else -1
+            worst_ratio = (
+                float(ratios[worst_interval]) if worst_interval >= 0 else 0.0
+            )
+            if worst_ratio > max_local_ratio:
+                raise ValueError(
+                    "Retarget result contains a temporal joint-velocity discontinuity: "
+                    f"frame interval {worst_interval}->{worst_interval + 1}, "
+                    f"local ratio={worst_ratio:.3f}, limit={max_local_ratio:.3f}"
+                )
+
+        if self.verbose:
+            peak = float(np.max(abs_joint_vel))
+            first_l2 = float(np.linalg.norm(joint_vel[0]))
+            first_peak = float(np.max(abs_joint_vel[0]))
+            print(
+                "[motion validation] "
+                f"peak={peak:.4f} rad/s, first-interval L2={first_l2:.4f} rad/s, "
+                f"first-interval peak={first_peak:.4f} rad/s"
+            )
+
     def save_results_as_csv(self, output_path):
         if len(self.result_pos) == 0:
             raise ValueError("No retarget results to save. Run retarget() first.")
@@ -692,6 +1137,8 @@ class RobotRetarget:
             raise ValueError(
                 f"result_pos shape must be [num_frame, num_joint>=7], got {result.shape}"
             )
+        result = self._postprocess_result_motion(result)
+        self._validate_result_motion(result)
 
         # Reorder the first-7-column quaternion from wxyz (cols 3..6) to xyzw
         result_xyzw = result.copy()
@@ -747,6 +1194,8 @@ if  __name__ == "__main__":
             for field_name in RobotRetarget.LEGACY_CONTACT_CONFIG_TO_NAMES
         }
     contact_position_cost = config.get("contact_pos_fixed_factor", 10.0)
+    initialization_sweep_frames = config.get("initialization_sweep_frames", 0)
+    motion_validation = config.get("motion_validation", {})
     
     robot_retarget = RobotRetarget(
         model_path=robot_xml_path,
@@ -758,6 +1207,8 @@ if  __name__ == "__main__":
         joints_limit_offset_degrees=joints_limit_offset_degrees,
         contact_body_names=contact_body_names,
         contact_position_cost=contact_position_cost,
+        initialization_sweep_frames=initialization_sweep_frames,
+        motion_validation=motion_validation,
     )
 
     robot_retarget.retarget()
