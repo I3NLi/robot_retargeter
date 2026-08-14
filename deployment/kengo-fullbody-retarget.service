@@ -1,0 +1,34 @@
+[Unit]
+Description=Kengo PICO native C++ full-body retarget telemetry
+After=network-online.target kengo-xrobotoolkit-bridge.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/opt/kengo-fullbody-retarget/current
+ExecStart=/opt/kengo-fullbody-retarget/current/deployment/run_realtime_fullbody.sh
+Restart=on-failure
+RestartSec=2
+Nice=10
+CPUAffinity=6
+Environment=ROS_DOMAIN_ID=89
+Environment=FASTRTPS_DEFAULT_PROFILES_FILE=/home/admin/instinct_deepdive_ws/no_shm.xml
+Environment=ROS_LOG_DIR=/run/kengo-fullbody-retarget
+RuntimeDirectory=kengo-fullbody-retarget
+RuntimeDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=true
+TimeoutStopSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

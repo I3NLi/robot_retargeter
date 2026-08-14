@@ -1,0 +1,36 @@
+[Unit]
+Description=Kengo full-body upper-target/measured-lower command bridge
+After=network-online.target kengo-fullbody-retarget.service
+Wants=network-online.target kengo-fullbody-retarget.service
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/opt/kengo-fullbody-command-bridge/current
+ExecStart=/opt/kengo-fullbody-command-bridge/current/deployment/run_fullbody_command_bridge.sh
+Restart=on-failure
+RestartSec=2
+RestartPreventExitStatus=77
+Nice=5
+CPUAffinity=5
+Environment=KENGO_FULLBODY_COMMAND_ARMED=0
+Environment=ROS_DOMAIN_ID=89
+Environment=FASTRTPS_DEFAULT_PROFILES_FILE=/home/admin/instinct_deepdive_ws/no_shm.xml
+Environment=ROS_LOG_DIR=/run/kengo-fullbody-command-bridge
+RuntimeDirectory=kengo-fullbody-command-bridge
+RuntimeDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=true
+TimeoutStopSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,34 @@
+[Unit]
+Description=Kengo full-body upper target with measured lower-body telemetry
+After=network-online.target kengo-fullbody-retarget.service kengo-deepdive-ros.service
+Wants=network-online.target kengo-fullbody-retarget.service kengo-deepdive-ros.service
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/opt/kengo-fullbody-composed-target/current
+ExecStart=/opt/kengo-fullbody-composed-target/current/deployment/run_fullbody_composed_target.sh
+Restart=on-failure
+RestartSec=2
+Nice=10
+CPUAffinity=7
+Environment=ROS_DOMAIN_ID=89
+Environment=FASTRTPS_DEFAULT_PROFILES_FILE=/home/admin/instinct_deepdive_ws/no_shm.xml
+Environment=ROS_LOG_DIR=/run/kengo-fullbody-composed-target
+RuntimeDirectory=kengo-fullbody-composed-target
+RuntimeDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=true
+TimeoutStopSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

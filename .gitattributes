@@ -1,4 +1,5 @@
-# Intentionally left blank: this repository does not use Git LFS.
+* text=auto eol=lf
+# This repository does not use Git LFS.
 *.stl !text !filter !merge !diff
 *.STL !text !filter !merge !diff
 *.obj !text !filter !merge !diff

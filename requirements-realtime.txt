@@ -1,0 +1,9 @@
+# Realtime ARM64 service dependencies. ROS 2 packages are inherited from the
+# Kengo system installation via a venv created with --system-site-packages.
+mujoco==3.3.4
+mink==0.0.13
+numpy==2.2.6
+scipy==1.15.3
+qpsolvers==4.13.0
+daqp==0.8.7
+PyYAML==6.0.3

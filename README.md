@@ -25,6 +25,25 @@ Directory layout:
 
 ## Installation
 
+### One-command Kengo service installation
+
+The `kengo` branch can build, self-test, atomically activate, and verify the
+native full-body retarget and composed-target telemetry services from Windows:
+
+```powershell
+.\deployment\install_remote.ps1 `
+  -HostKey "ssh-ed25519 255 SHA256:..."
+```
+
+The wrapper defaults to the Kengo LAN address `10.200.6.146`, prompts for SSH
+credentials, uploads an exact source/model payload, and never puts a password
+in a process argument. The robot-side installer requires Walk stopped and HDAS
+Mode 1, builds a new release before changing either `current` link, and rolls
+both telemetry services back together if startup fails. The archived direct
+`/hybrid_body_controller/commands` bridge remains disabled and is not compiled.
+Use `-RemoteMujocoRoot /absolute/path` only when automatic MuJoCo 3.3.4
+discovery cannot find the existing Kengo development package.
+
 ### Clone the repository
 
 ```bash
@@ -217,6 +236,43 @@ MUJOCO_GL=egl python scripts/render_robot_motion.py \
 ```
 
 The output is an H.264/yuv420p MP4 with a camera that follows the robot root.
+
+### Native real-time Kengo full-body telemetry
+
+`cpp/` contains the standalone `rclcpp` implementation used for live PICO
+full-body retargeting. It subscribes to `/pico4/body_tracking/ik_poses` and
+to the persistent upper-body service's latest
+`/pico4/retargeted/joint_targets`, then publishes the fused 23-joint telemetry
+target on
+`/pico4/retargeted/full_body_joint_targets`. It never opens an HDAS command,
+service or action endpoint. The node ports the same target construction,
+MuJoCo body Jacobians, SE(3) FrameTasks, LM damping, joint limits, warm start and
+failure-atomic update used by the Python/Mink reference.
+
+Waist, legs, wrists and the remaining whole-body configuration come from the
+native full-body solve. The eight shoulder/elbow joints are replaced by the
+strictly validated, no-older-than-250-ms result from the latest persistent
+upper-body IK service. Missing or stale upper-body data never suppresses the
+camera-derived full-body frame; `JointState.header.frame_id` distinguishes the
+camera-only and upper-grafted roles.
+
+The production build keeps a `KEEP_ALL` FIFO and does not rate-limit or replace
+valid input. On Kengo a 200-frame real PICO replay matched the Python reference
+to `1.4e-14 rad`, while the complete native solve measured 0.34 ms mean and
+0.54 ms P95. See [deployment/FULLBODY_CPP.md](deployment/FULLBODY_CPP.md) for
+build, differential-test and service contracts.
+
+### Optional native command bridge
+
+The separate `kengo_fullbody_command_bridge_node` can compose both ten-joint
+arm targets from `/pico4/retargeted/full_body_joint_targets` with measured
+waist and leg positions from `/hybrid_body_controller/joint_states`, then emit
+a complete 23-joint `HybridJointCommand`. It is a real control publisher and is
+therefore installed independently, disabled and unarmed by default. Its 50 Hz
+output uses the production upper-body slew/envelope limits, strict freshness
+checks, a single zero-gain release frame on input loss, and refuses to publish
+alongside another commands publisher. See
+[deployment/FULLBODY_COMMAND_BRIDGE.md](deployment/FULLBODY_COMMAND_BRIDGE.md).
 
 ## Core Mechanisms
 

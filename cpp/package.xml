@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>kengo_fullbody_retarget_cpp</name>
+  <version>0.1.0</version>
+  <description>Native PICO SMPL-24 to Kengo full-body retarget telemetry.</description>
+  <maintainer email="admin@example.com">admin</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>hdas2</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

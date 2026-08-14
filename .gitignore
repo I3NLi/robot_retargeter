@@ -1,11 +1,10 @@
 # ---- SMPL-X models (must be downloaded separately, see README) ----
 asset/smplx/
 
-# ---- Supplied Kengo robot assets (local use only; source says "Do Not distribute") ----
-# Keep the local G1-compatible layout functional without allowing the vendor
-# XML or meshes to be added accidentally to this public-upstream clone.
-asset/robot/kengo_description/meshes/
-asset/robot/kengo_description/mjcf/kengo.xml
+# ---- Kengo robot assets ----
+# The Kengo deployment branch carries the runtime model so a release can be
+# built deterministically with the one-command installer. Binary mesh files
+# remain marked non-text in .gitattributes.
 
 # ---- Python ----
 __pycache__/
@@ -15,6 +14,7 @@ __pycache__/
 *.egg
 .eggs/
 build/
+cpp/build/
 dist/
 develop-eggs/
 .installed.cfg
@@ -47,6 +47,10 @@ output_data/
 # ---- Logs / temp ----
 *.log
 *.tmp
+MUJOCO_LOG.TXT
+.diagnostics/
+deployment/wheels/
+deployment/*.tar.gz
 
 view_mjcf.py
 

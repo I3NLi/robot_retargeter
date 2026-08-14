@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>kengo_fullbody_composed_target</name>
+  <version>0.1.0</version>
+  <description>Full-body upper target with measured Kengo lower-body telemetry.</description>
+  <maintainer email="admin@example.com">admin</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>hdas2</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

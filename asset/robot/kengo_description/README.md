@@ -1,9 +1,10 @@
-# Kengo local asset
+# Kengo deployment asset
 
 This directory is the local asset slot used by `config/robot/kengo.yaml`.
-The source bundle's README says **"Do Not distribute"**, so the raw MJCF and
-STL files are intentionally ignored by Git and must not be pushed to the
-public CCRP upstream.
+The Kengo deployment branch versions the MJCF and STL files so the native
+service release can be built deterministically by the one-command installer.
+This is an operator-authorized internal deployment decision; do not push these
+files to a public upstream without separately confirming the asset licence.
 
 The working copy uses the supplied `kengo_with_fist` model because that is the
 23-DoF embodiment used by the local Kengo training and deployment stacks. The
