@@ -46,6 +46,21 @@ class NativeFullBodyContractTests(unittest.TestCase):
         for marker in ("create_service", "create_client", "create_wall_timer"):
             self.assertNotIn(marker, node)
 
+    def test_upper_follow_velocity_is_bounded_and_hot_adjustable(self) -> None:
+        node = (ROOT / "cpp/src/fullbody_retarget_node.cpp").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            '"max_upper_follow_velocity_rad_s"', node
+        )
+        self.assertIn("kDefaultUpperFollowVelocityRadS = 0.60", node)
+        self.assertIn("kMinimumUpperFollowVelocityRadS = 0.10", node)
+        self.assertIn("kMaximumUpperFollowVelocityRadS = 2.00", node)
+        self.assertIn("add_on_set_parameters_callback", node)
+        self.assertIn("std::atomic<double> upper_follow_velocity_rad_s_", node)
+        self.assertIn("ApplyUpperFollowLimit(result, follow_time)", node)
+        self.assertIn(".start_parameter_services(true)", node)
+
     def test_runner_executes_native_binary_without_python(self) -> None:
         runner = (ROOT / "deployment/run_realtime_fullbody.sh").read_text(
             encoding="utf-8"
@@ -55,6 +70,9 @@ class NativeFullBodyContractTests(unittest.TestCase):
         )
         self.assertIn('exec "${RELEASE_DIR}/bin/kengo_fullbody_retarget_node"', runner)
         self.assertNotIn("python", runner.lower())
+        self.assertIn("/var/lib/kengo-robot-gui/upper_follow_speed_rad_s", runner)
+        self.assertIn('max_upper_follow_velocity_rad_s:=${UPPER_FOLLOW_SPEED}', runner)
+        self.assertIn("value >= 0.10 && value <= 2.00", runner)
         self.assertIn("libmujoco.so.3.3.4", builder)
         self.assertIn("--self-test", builder)
 

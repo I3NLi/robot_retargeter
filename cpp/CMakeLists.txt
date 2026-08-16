@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(hdas2 REQUIRED)
@@ -36,7 +37,7 @@ add_executable(kengo_fullbody_retarget_node
   src/fullbody_retarget_node.cpp)
 target_link_libraries(kengo_fullbody_retarget_node kengo_fullbody_core)
 ament_target_dependencies(kengo_fullbody_retarget_node
-  rclcpp geometry_msgs sensor_msgs)
+  rclcpp rcl_interfaces geometry_msgs sensor_msgs)
 target_compile_options(kengo_fullbody_retarget_node PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 option(BUILD_LEGACY_COMMAND_BRIDGE

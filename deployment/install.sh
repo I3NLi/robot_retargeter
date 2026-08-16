@@ -119,7 +119,8 @@ for unit in "${RETARGET_UNIT}" "${COMPOSED_UNIT}"; do
 done
 
 atomic_link() {
-  local target="$1" link="$2" temporary="${link}.next.$$"
+  local target="$1" link="$2" temporary
+  temporary="${link}.next.$$"
   ln -s -- "${target}" "${temporary}"
   mv -Tf -- "${temporary}" "${link}"
 }

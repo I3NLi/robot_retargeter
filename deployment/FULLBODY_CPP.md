@@ -14,9 +14,8 @@ interpreter.
 - Input QoS: `KEEP_ALL`, best effort, volatile
 - Output QoS: `KEEP_ALL`, reliable, volatile
 - Exactly two application subscriptions and one telemetry publisher. ROS 2
-  Humble's standard `rclcpp::Node` also owns a read-only `/parameter_events`
-  subscription for its time/parameter infrastructure; the node publishes no
-  parameter events and starts no parameter services.
+  parameter services are enabled only for the bounded
+  `max_upper_follow_velocity_rad_s` hot-reload parameter.
 - No command publisher, service, client, action or timer
 
 Every structurally valid frame is queued and solved in arrival order. There is
@@ -32,6 +31,13 @@ never blocks camera full-body telemetry: the original full-body solve is
 published with frame `kengo_torso_target_camera_fullbody`; a successfully fused
 frame uses `kengo_torso_target_upper_grafted`. This service still never
 publishes an HDAS command.
+
+All ten arm targets are slew-limited to `0.60 rad/s` by default. The parameter
+`max_upper_follow_velocity_rad_s` can be changed online within
+`0.10–2.00 rad/s`; an invalid or non-finite value is rejected. The launcher
+restores a valid value from
+`/var/lib/kengo-robot-gui/upper_follow_speed_rad_s`, otherwise it uses the
+default. Updating this parameter does not restart this node or the Walk process.
 
 ## Build
 
@@ -60,9 +66,8 @@ Before replacing the service, all of the following are required:
    count within the release tolerance.
 3. A remapped live probe sustains at least the PICO input rate with queue depth
    returning to zero and no failed frames.
-4. The probe node exposes the declared input subscription, the standard
-   read-only `/parameter_events` subscription, and the remapped telemetry
-   publisher; no other endpoints are allowed.
+4. The probe node exposes the declared inputs, telemetry publisher and bounded
+   ROS 2 parameter services; it exposes no command, action or timer endpoint.
 5. Candidate startup and online verification pass; otherwise the previous
    release symlink and service are restored.
 

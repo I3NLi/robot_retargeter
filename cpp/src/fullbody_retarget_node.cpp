@@ -1,6 +1,7 @@
 #include "kengo_fullbody/retarget_core.hpp"
 
 #include <geometry_msgs/msg/pose_array.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 
@@ -14,6 +15,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -35,6 +37,13 @@ constexpr char kInputTopic[] = "/pico4/body_tracking/ik_poses";
 constexpr char kUpperBodyTopic[] = "/pico4/retargeted/joint_targets";
 constexpr char kOutputTopic[] = "/pico4/retargeted/full_body_joint_targets";
 constexpr auto kUpperBodyMaximumAge = std::chrono::milliseconds(250);
+constexpr char kUpperFollowVelocityParameter[] =
+    "max_upper_follow_velocity_rad_s";
+constexpr double kDefaultUpperFollowVelocityRadS = 0.60;
+constexpr double kMinimumUpperFollowVelocityRadS = 0.10;
+constexpr double kMaximumUpperFollowVelocityRadS = 2.00;
+constexpr double kNominalFollowPeriodSeconds = 0.02;
+constexpr double kMaximumFollowPeriodSeconds = 0.10;
 
 const std::array<std::string, kengo_fullbody::kPicoUpperBodyJointCount>
     kUpperBodyJointNames = {
@@ -43,6 +52,16 @@ const std::array<std::string, kengo_fullbody::kPicoUpperBodyJointCount>
         "right_shoulder_pitch_joint", "right_shoulder_roll_joint",
         "right_shoulder_yaw_joint",   "right_elbow_joint",
     };
+
+constexpr std::size_t kFollowLimitedJointCount = 10;
+const std::array<std::string, kFollowLimitedJointCount>
+    kFollowLimitedJointNames = {
+    "left_shoulder_pitch_joint", "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",   "left_elbow_joint",
+    "left_wrist_roll_joint",     "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
+    "right_elbow_joint",         "right_wrist_roll_joint",
+};
 
 struct Options {
   std::string model;
@@ -243,6 +262,27 @@ class FullBodyNode final : public rclcpp::Node {
   FullBodyNode(const Options& options, const rclcpp::NodeOptions& node_options)
       : Node("kengo_pico_fullbody_retarget", node_options),
         retargeter_(options.model, options.config) {
+    const auto& joint_names = retargeter_.joint_names();
+    for (std::size_t upper = 0; upper < kFollowLimitedJointNames.size(); ++upper) {
+      const auto match = std::find(joint_names.begin(), joint_names.end(),
+                                   kFollowLimitedJointNames[upper]);
+      if (match == joint_names.end()) {
+        throw std::runtime_error("follow-limited upper joint is missing: " +
+                                 kFollowLimitedJointNames[upper]);
+      }
+      follow_limited_indices_[upper] = static_cast<std::size_t>(
+          std::distance(joint_names.begin(), match));
+    }
+    const double initial_follow_velocity = declare_parameter<double>(
+        kUpperFollowVelocityParameter, kDefaultUpperFollowVelocityRadS);
+    if (!ValidUpperFollowVelocity(initial_follow_velocity)) {
+      throw std::runtime_error("initial upper follow velocity is out of range");
+    }
+    upper_follow_velocity_rad_s_.store(initial_follow_velocity,
+                                       std::memory_order_relaxed);
+    parameter_callback_ = add_on_set_parameters_callback(
+        std::bind(&FullBodyNode::ConfigureParameters, this,
+                  std::placeholders::_1));
     const auto input_qos =
         rclcpp::QoS(rclcpp::KeepAll()).best_effort().durability_volatile();
     const auto output_qos =
@@ -278,6 +318,72 @@ class FullBodyNode final : public rclcpp::Node {
   }
 
  private:
+  static bool ValidUpperFollowVelocity(double value) {
+    return std::isfinite(value) && value >= kMinimumUpperFollowVelocityRadS &&
+           value <= kMaximumUpperFollowVelocityRadS;
+  }
+
+  rcl_interfaces::msg::SetParametersResult ConfigureParameters(
+      const std::vector<rclcpp::Parameter>& parameters) {
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+    for (const auto& parameter : parameters) {
+      if (parameter.get_name() != kUpperFollowVelocityParameter) {
+        continue;
+      }
+      if (parameter.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE ||
+          !ValidUpperFollowVelocity(parameter.as_double())) {
+        result.successful = false;
+        result.reason =
+            "max_upper_follow_velocity_rad_s must be a finite double in "
+            "[0.10, 2.00]";
+        return result;
+      }
+      upper_follow_velocity_rad_s_.store(parameter.as_double(),
+                                         std::memory_order_relaxed);
+    }
+    return result;
+  }
+
+  void SeedUpperFollowState(const RetargetResult& result,
+                            std::chrono::steady_clock::time_point now) {
+    if (has_previous_upper_output_) {
+      return;
+    }
+    for (std::size_t upper = 0; upper < follow_limited_indices_.size(); ++upper) {
+      previous_upper_output_[upper] =
+          result.positions[follow_limited_indices_[upper]];
+    }
+    previous_upper_output_at_ =
+        now - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                  std::chrono::duration<double>(kNominalFollowPeriodSeconds));
+    has_previous_upper_output_ = true;
+  }
+
+  void ApplyUpperFollowLimit(
+      RetargetResult& result, std::chrono::steady_clock::time_point now) {
+    SeedUpperFollowState(result, now);
+    double elapsed = std::chrono::duration<double>(
+                         now - previous_upper_output_at_)
+                         .count();
+    if (!std::isfinite(elapsed) || elapsed <= 0.0) {
+      elapsed = kNominalFollowPeriodSeconds;
+    }
+    elapsed = std::min(elapsed, kMaximumFollowPeriodSeconds);
+    const double maximum_step =
+        upper_follow_velocity_rad_s_.load(std::memory_order_relaxed) * elapsed;
+    for (std::size_t upper = 0; upper < follow_limited_indices_.size(); ++upper) {
+      const std::size_t target_index = follow_limited_indices_[upper];
+      const double base = previous_upper_output_[upper];
+      const double desired = result.positions[target_index];
+      const double limited =
+          base + std::clamp(desired - base, -maximum_step, maximum_step);
+      result.positions[target_index] = limited;
+      previous_upper_output_[upper] = limited;
+    }
+    previous_upper_output_at_ = now;
+  }
+
   void ReceiveUpperBody(const sensor_msgs::msg::JointState& message) {
     if (message.name.size() != kUpperBodyJointNames.size() ||
         message.position.size() != kUpperBodyJointNames.size()) {
@@ -388,6 +494,8 @@ class FullBodyNode final : public rclcpp::Node {
       }
       try {
         RetargetResult result = retargeter_.Solve(sample->pose);
+        const auto follow_time = std::chrono::steady_clock::now();
+        SeedUpperFollowState(result, follow_time);
         const std::optional<UpperBodyTarget> upper = FreshUpperBodyTarget();
         std::string frame_role = "kengo_torso_target_camera_fullbody";
         if (upper.has_value()) {
@@ -398,6 +506,7 @@ class FullBodyNode final : public rclcpp::Node {
         } else {
           upper_unavailable_.fetch_add(1, std::memory_order_relaxed);
         }
+        ApplyUpperFollowLimit(result, follow_time);
         sensor_msgs::msg::JointState output;
         if (sample->source_stamp_ns > 0) {
           output.header.stamp.sec = static_cast<std::int32_t>(
@@ -434,6 +543,9 @@ class FullBodyNode final : public rclcpp::Node {
                   << " upper_rejected=" << upper_rejected_.load()
                   << " upper_grafted=" << upper_grafted_.load()
                   << " upper_unavailable=" << upper_unavailable_.load()
+                  << " upper_follow_velocity_rad_s="
+                  << upper_follow_velocity_rad_s_.load(
+                         std::memory_order_relaxed)
                   << std::endl;
         next_status = std::chrono::steady_clock::now() + std::chrono::seconds(5);
       }
@@ -461,6 +573,14 @@ class FullBodyNode final : public rclcpp::Node {
   std::atomic<std::uint64_t> upper_rejected_{0};
   std::atomic<std::uint64_t> upper_grafted_{0};
   std::atomic<std::uint64_t> upper_unavailable_{0};
+  std::array<std::size_t, kFollowLimitedJointCount> follow_limited_indices_{};
+  std::array<double, kFollowLimitedJointCount> previous_upper_output_{};
+  std::chrono::steady_clock::time_point previous_upper_output_at_{};
+  bool has_previous_upper_output_{false};
+  std::atomic<double> upper_follow_velocity_rad_s_{
+      kDefaultUpperFollowVelocityRadS};
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
+      parameter_callback_;
 };
 
 }  // namespace
@@ -474,7 +594,7 @@ int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
     rclcpp::NodeOptions node_options;
     node_options.enable_rosout(false)
-        .start_parameter_services(false)
+        .start_parameter_services(true)
         .start_parameter_event_publisher(false);
     auto node = std::make_shared<FullBodyNode>(options, node_options);
     rclcpp::spin(node);
